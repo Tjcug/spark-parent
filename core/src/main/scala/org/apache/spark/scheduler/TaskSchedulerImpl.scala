@@ -351,10 +351,12 @@ private[spark] class TaskSchedulerImpl(
                 failedExecutor = Some(execId)
               }
             }
+            // 调用TaskSchedulerImpl的statusUpdate方法，根据任务执行不同的结果处理
             if (TaskState.isFinished(state)) {
               cleanupTaskState(tid)
               taskSet.removeRunningTask(tid)
               if (state == TaskState.FINISHED) {
+                // 任务执行成功后，回收该Executor运行该任务的CPU，再根据实际情况分配任务
                 taskResultGetter.enqueueSuccessfulTask(taskSet, tid, serializedData)
               } else if (Set(TaskState.FAILED, TaskState.KILLED, TaskState.LOST).contains(state)) {
                 taskResultGetter.enqueueFailedTask(taskSet, tid, state, serializedData)

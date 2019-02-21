@@ -96,14 +96,17 @@ private[spark] class StandaloneAppClient(
      *  Register with all masters asynchronously and returns an array `Future`s for cancellation.
      */
     private def tryRegisterAllMasters(): Array[JFuture[_]] = {
+      // 遍历所有的Master, 这是一个for推导式，会构造会一个集合
       for (masterAddress <- masterRpcAddresses) yield {
+        // 在线程池中启动注册线程，当该线程读到应用注册成功标识registered==true时退出注册线程
         registerMasterThreadPool.submit(new Runnable {
           override def run(): Unit = try {
-            if (registered.get) {
+            if (registered.get) { // private val registered = new AtomicBoolean(false) 原子类型
               return
             }
             logInfo("Connecting to master " + masterAddress.toSparkURL + "...")
             val masterRef = rpcEnv.setupEndpointRef(masterAddress, Master.ENDPOINT_NAME)
+            // 发送注册消息
             masterRef.send(RegisterApplication(appDescription, self))
           } catch {
             case ie: InterruptedException => // Cancelled

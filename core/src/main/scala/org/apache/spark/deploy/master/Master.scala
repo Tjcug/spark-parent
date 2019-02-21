@@ -233,12 +233,14 @@ private[deploy] class Master(
         val app = createApplication(description, driver)
         registerApplication(app)
         logInfo("Registered app " + description.name + " with ID " + app.id)
+        // 使用持久化引擎，将Application进行持久化
         persistenceEngine.addApplication(app)
         driver.send(RegisteredApplication(app.id, self))
         schedule()
       }
 
     case ExecutorStateChanged(appId, execId, state, message, exitStatus) =>
+      // 找到executor对应的app，然后flatMap，通过app内部的缓存获取executor信息
       val execOption = idToApp.get(appId).flatMap(app => app.executors.get(execId))
       execOption match {
         case Some(exec) =>
@@ -246,12 +248,14 @@ private[deploy] class Master(
           val oldState = exec.state
           exec.state = state
 
+          // 设置executor的当前状态
           if (state == ExecutorState.RUNNING) {
             assert(oldState == ExecutorState.LAUNCHING,
               s"executor $execId state transfer from $oldState to RUNNING is illegal")
             appInfo.resetRetryCount()
           }
 
+          // 向Driver发送ExecutorUpdated消息
           exec.application.driver.send(ExecutorUpdated(execId, state, message, exitStatus, false))
 
           if (ExecutorState.isFinished(state)) {
@@ -378,18 +382,24 @@ private[deploy] class Master(
 
   }
 
+  // Master收到消息后，需要对Worker发送的信息进行验证、记录。如果注册成功，则发送RegisteredWorker消息给对应的Worker，告诉Worker已经完成注册，
+  // 随之进行步骤3，即Worker定期发送心跳给Master；如果注册过程中失败，则会发送RegisterWorkerFailed消息，Woker打印出错日志并结束Worker启动。
   override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
     case RegisterWorker(
         id, workerHost, workerPort, workerRef, cores, memory, workerWebUiUrl) =>
       logInfo("Registering worker %s:%d with %d cores, %s RAM".format(
         workerHost, workerPort, cores, Utils.megabytesToString(memory)))
+      // Master处于STANDBY状态
       if (state == RecoveryState.STANDBY) {
         context.reply(MasterInStandby)
       } else if (idToWorker.contains(id)) {
+        // 在注册列表中发现了该Worker节点
         context.reply(RegisterWorkerFailed("Duplicate worker ID"))
       } else {
         val worker = new WorkerInfo(id, workerHost, workerPort, cores, memory,
           workerRef, workerWebUiUrl)
+        // registerWorker方法会把Worker放到注册列表中
+        // 用于后续运行时任务使用
         if (registerWorker(worker)) {
           persistenceEngine.addWorker(worker)
           context.reply(RegisteredWorker(self, masterWebUiUrl))
@@ -648,6 +658,7 @@ private[deploy] class Master(
   private def startExecutorsOnWorkers(): Unit = {
     // Right now this is a very simple FIFO scheduler. We keep trying to fit in the first app
     // in the queue, then the second app, etc.
+    // 使用FIFO算法运行应用，即先注册的应用先运行
     for (app <- waitingApps if app.coresLeft > 0) {
       val coresPerExecutor: Option[Int] = app.desc.coresPerExecutor
       // Filter out workers that don't have enough resources to launch an executor
@@ -655,9 +666,11 @@ private[deploy] class Master(
         .filter(worker => worker.memoryFree >= app.desc.memoryPerExecutorMB &&
           worker.coresFree >= coresPerExecutor.getOrElse(1))
         .sortBy(_.coresFree).reverse
+      // 一种是spreadOutApps，就是把应用运行在尽量多的Worker上，另一种是非spreadOutApps
       val assignedCores = scheduleExecutorsOnWorkers(app, usableWorkers, spreadOutApps)
 
       // Now that we've decided how many cores to allocate on each worker, let's allocate them
+      // 给每个worker分配完application要求的cpu core之后，遍历worker启动executor
       for (pos <- 0 until usableWorkers.length if assignedCores(pos) > 0) {
         allocateWorkerResourceToExecutors(
           app, assignedCores(pos), coresPerExecutor, usableWorkers(pos))
@@ -697,10 +710,12 @@ private[deploy] class Master(
     if (state != RecoveryState.ALIVE) {
       return
     }
+    // 对Worker节点进行随机排序
     // Drivers take strict precedence over executors
     val shuffledAliveWorkers = Random.shuffle(workers.toSeq.filter(_.state == WorkerState.ALIVE))
     val numWorkersAlive = shuffledAliveWorkers.size
     var curPos = 0
+    // 按照顺序在集群中启动Driver，Driver尽量在不同的Worker节点上运行
     for (driver <- waitingDrivers.toList) { // iterate over a copy of waitingDrivers
       // We assign workers to each waiting driver in a round-robin fashion. For each driver, we
       // start from the last worker that was assigned a driver, and continue onwards until we have

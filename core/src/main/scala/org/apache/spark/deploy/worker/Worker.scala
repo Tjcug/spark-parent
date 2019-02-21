@@ -206,12 +206,15 @@ private[deploy] class Worker(
     cancelLastRegistrationRetry()
   }
 
+  // 因为Master可能不止有一个
+  // 当Master启动后，随之启动各Worker，Worker启动时会创建通信环境RpcEnv和终端点EndPoint，并向Master发送注册Worker的消息
   private def tryRegisterAllMasters(): Array[JFuture[_]] = {
     masterRpcAddresses.map { masterAddress =>
       registerMasterThreadPool.submit(new Runnable {
         override def run(): Unit = {
           try {
             logInfo("Connecting to master " + masterAddress + "...")
+            // 获取Master终端点的引用
             val masterEndpoint = rpcEnv.setupEndpointRef(masterAddress, Master.ENDPOINT_NAME)
             registerWithMaster(masterEndpoint)
           } catch {
@@ -339,9 +342,11 @@ private[deploy] class Worker(
   }
 
   private def registerWithMaster(masterEndpoint: RpcEndpointRef): Unit = {
+    // 根据Master节点的引用发送注册信息
     masterEndpoint.ask[RegisterWorkerResponse](RegisterWorker(
       workerId, host, port, self, cores, memory, workerWebUiUrl))
       .onComplete {
+        /// 返回注册成功或失败的结果
         // This is a very fast action so we can use "ThreadUtils.sameThread"
         case Success(msg) =>
           Utils.tryLogNonFatalError {
@@ -442,6 +447,7 @@ private[deploy] class Worker(
           logInfo("Asked to launch executor %s/%d for %s".format(appId, execId, appDesc.name))
 
           // Create the executor's working directory
+          // 创建executor执行目录
           val executorDir = new File(workDir, appId + "/" + execId)
           if (!executorDir.mkdirs()) {
             throw new IOException("Failed to create directory " + executorDir)
@@ -450,6 +456,7 @@ private[deploy] class Worker(
           // Create local dirs for the executor. These are passed to the executor via the
           // SPARK_EXECUTOR_DIRS environment variable, and deleted by the Worker when the
           // application finishes.
+          // 通过SPARK_EXECUTOR_DIRS环境变量，在Worker中创建Executor执行目录，当程序执行完毕后由Worker进行删除。
           val appLocalDirs = appDirectories.getOrElse(appId,
             Utils.getOrCreateLocalRootDirs(conf).map { dir =>
               val appDir = Utils.createDirectory(dir, namePrefix = "executor")
@@ -457,6 +464,9 @@ private[deploy] class Worker(
               appDir.getAbsolutePath()
             }.toSeq)
           appDirectories(appId) = appLocalDirs
+
+          // 在Executor中创建CoarseGrainedExecutorBackend对象，创建的是使用应用
+          // 信息中的command，而 command在SparkDeploySchedulerBackend的start方法中构建
           val manager = new ExecutorRunner(
             appId,
             execId,
@@ -477,6 +487,8 @@ private[deploy] class Worker(
           manager.start()
           coresUsed += cores_
           memoryUsed += memory_
+
+          // 向Master发送消息，
           sendToMaster(ExecutorStateChanged(appId, execId, manager.state, None, None))
         } catch {
           case e: Exception =>
