@@ -425,8 +425,9 @@ private[spark] class TaskSetManager(
       val curTime = clock.getTimeMillis()
 
       var allowedLocality = maxLocality
-
+      //如果资源有Locality特性
       if (maxLocality != TaskLocality.NO_PREF) {
+        //获取当前任务集运行执行的Locality,getAllowedLocalityLevel随时间的变化而变化
         allowedLocality = getAllowedLocalityLevel(curTime)
         if (allowedLocality > maxLocality) {
           // We're not allowed to search for farther-away tasks
@@ -454,6 +455,7 @@ private[spark] class TaskSetManager(
           }
           // Serialize and return the task
           val startTime = clock.getTimeMillis()
+          //更新相关信息，并对任务进行序列化
           val serializedTask: ByteBuffer = try {
             Task.serializeWithDependencies(task, sched.sc.addedFiles, sched.sc.addedJars, ser)
           } catch {
@@ -472,6 +474,7 @@ private[spark] class TaskSetManager(
               s"(${serializedTask.limit / 1024} KB). The maximum recommended task size is " +
               s"${TaskSetManager.TASK_SIZE_TO_WARN_KB} KB.")
           }
+          //把该任务加入到运行任务列表中
           addRunningTask(taskId)
 
           // We used to log the time it takes to serialize the task, but task size is already
@@ -482,6 +485,7 @@ private[spark] class TaskSetManager(
             s" $taskLocality, ${serializedTask.limit} bytes)")
 
           sched.dagScheduler.taskStarted(task, info)
+          //返回Worker中Executor运行任务相关信息
           return Some(new TaskDescription(taskId = taskId, attemptNumber = attemptNum, execId,
             taskName, index, serializedTask))
         case _ =>

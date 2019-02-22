@@ -257,12 +257,16 @@ private[spark] class TaskSchedulerImpl(
       shuffledOffers: Seq[WorkerOffer],
       availableCpus: Array[Int],
       tasks: Seq[ArrayBuffer[TaskDescription]]) : Boolean = {
+    //遍历所有Worker，为每个Worker分配运行的任务
     var launchedTask = false
     for (i <- 0 until shuffledOffers.size) {
       val execId = shuffledOffers(i).executorId
       val host = shuffledOffers(i).host
+
+      //当Worker的CPU核数满足任务运行核数
       if (availableCpus(i) >= CPUS_PER_TASK) {
         try {
+          //对指定Executor分配运行的任务，分配后 更新相关列表和递减可用的CPU
           for (task <- taskSet.resourceOffer(execId, host, maxLocality)) {
             tasks(i) += task
             val tid = task.taskId
@@ -309,11 +313,11 @@ private[spark] class TaskSchedulerImpl(
     }
 
     // Randomly shuffle offers to avoid always placing tasks on the same set of workers.
-    // 首先，将可用的executor进行shuffle
+    // 为了负载均衡，打乱Offers顺序，Random.shuffle用于将一个集合中的元素打乱
     val shuffledOffers = Random.shuffle(offers)
     // Build a list of tasks to assign to each worker.
-    // 用于存储分配好资源的任务
-    // tasks，是一个序列，其中的每个元素又是一个ArrayBuffer,并且每个子ArrayBuffer的数量是固定的，也就是这个executor可用的cpu数量
+
+    // 创建用于存储每个Worker所对应运行任务列表的Map
     val tasks = shuffledOffers.map(o => new ArrayBuffer[TaskDescription](o.cores))
     val availableCpus = shuffledOffers.map(o => o.cores).toArray
 
@@ -337,6 +341,7 @@ private[spark] class TaskSchedulerImpl(
     // 为排序好的TaskSetManager 列表进行分配资源，分配的原则是就近原则，按照顺序PROCESS_LOCAL, NODE_LOCAL, NO_PREF, RACK_LOCAL, ANY
     // NOTE: the preferredLocality order: PROCESS_LOCAL, NODE_LOCAL, NO_PREF, RACK_LOCAL, ANY
     var launchedTask = false
+    //通过任务集管理器的myLocalityLevels变量获取任务集中任务自身数据本地性列表
     for (taskSet <- sortedTaskSets; maxLocality <- taskSet.myLocalityLevels) {
       do {
         // 对当前taskset尝试使用最小本地化级别，将taskset的task，在executor上进行启动
