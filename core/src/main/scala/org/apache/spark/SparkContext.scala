@@ -486,9 +486,12 @@ class SparkContext(config: SparkConf) extends Logging with ExecutorAllocationCli
       HeartbeatReceiver.ENDPOINT_NAME, new HeartbeatReceiver(this))
 
     // Create and start the scheduler
+    // 创建和运行scheduler
+    // 创建SparkContext taskScheduler
     val (sched, ts) = SparkContext.createTaskScheduler(this, master, deployMode)
     _schedulerBackend = sched
     _taskScheduler = ts
+    // 创建SparkContext DAGScheduler
     _dagScheduler = new DAGScheduler(this)
     _heartbeatReceiver.ask[Boolean](TaskSchedulerIsSet)
 
@@ -1890,6 +1893,7 @@ class SparkContext(config: SparkConf) extends Logging with ExecutorAllocationCli
     if (conf.getBoolean("spark.logLineage", false)) {
       logInfo("RDD's recursive dependencies:\n" + rdd.toDebugString)
     }
+    // 调用DAGScheduler的runJob进行处理
     dagScheduler.runJob(rdd, cleanedFunc, partitions, callSite, resultHandler, localProperties.get)
     progressBar.foreach(_.finishAll())
     rdd.doCheckpoint()
@@ -2445,6 +2449,7 @@ object SparkContext extends Logging {
    * Create a task scheduler based on a given master URL.
    * Return a 2-tuple of the scheduler backend and the task scheduler.
    */
+  // 在创建SparkContext的时候，会执行val (sched, ts) = SparkContext.createTaskScheduler(this, master, deployMode)
   private def createTaskScheduler(
       sc: SparkContext,
       master: String,
@@ -2455,6 +2460,7 @@ object SparkContext extends Logging {
     val MAX_LOCAL_TASK_FAILURES = 1
 
     master match {
+      // 匹配master，我们这里主要以Standlone为主，所以，就只看SPARK_REGEX
       case "local" =>
         val scheduler = new TaskSchedulerImpl(sc, MAX_LOCAL_TASK_FAILURES, isLocal = true)
         val backend = new LocalSchedulerBackend(sc.getConf, scheduler, 1)
@@ -2483,10 +2489,14 @@ object SparkContext extends Logging {
         scheduler.initialize(backend)
         (backend, scheduler)
 
+      // Standlone模式
       case SPARK_REGEX(sparkUrl) =>
+        // 创建TaskScheduler
         val scheduler = new TaskSchedulerImpl(sc)
         val masterUrls = sparkUrl.split(",").map("spark://" + _)
+        // 创建StandaloneSchedulerBackend
         val backend = new StandaloneSchedulerBackend(scheduler, sc, masterUrls)
+        // 初始化taskScheduler, 主要是赋值backend以及根据调度方法创建调度池
         scheduler.initialize(backend)
         (backend, scheduler)
 

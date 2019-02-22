@@ -236,9 +236,13 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
     private def makeOffers(executorId: String) {
       // Filter out executors under killing
       if (executorIsAlive(executorId)) {
+        // 获取集群中可用的Executor列表
         val executorData = executorDataMap(executorId)
+        // workOffers是每个Executor可用的cpu资源数量
         val workOffers = Seq(
           new WorkerOffer(executorId, executorData.executorHost, executorData.freeCores))
+        // 第一步：调用TaskSchedulerImpl的resourceOffers()方法，执行任务分配算法，将各个task分配到executor上去
+        // 第二步：分配好task到executor之后，执行自己的launchTasks方法，将分配的task发送LaunchTask消息到对应executor上去，由executor启动并执行
         launchTasks(scheduler.resourceOffers(workOffers))
       }
     }
@@ -249,6 +253,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
     }
 
     // Launch tasks returned by a set of resource offers
+    // 根据分配好的tasks，在executor上启动相应的task
     private def launchTasks(tasks: Seq[Seq[TaskDescription]]) {
       for (task <- tasks.flatten) {
         val serializedTask = ser.serialize(task)
@@ -272,6 +277,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
           logInfo(s"Launching task ${task.taskId} on executor id: ${task.executorId} hostname: " +
             s"${executorData.executorHost}.")
 
+          // 向Worker节点的CoarseGrainedExecutorBackend发送消息执行Task
           executorData.executorEndpoint.send(LaunchTask(new SerializableBuffer(serializedTask)))
         }
       }

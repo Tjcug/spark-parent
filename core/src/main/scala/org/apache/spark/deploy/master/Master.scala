@@ -591,23 +591,42 @@ private[deploy] class Master(
       app: ApplicationInfo,
       usableWorkers: Array[WorkerInfo],
       spreadOutApps: Boolean): Array[Int] = {
+    // 应用程序中每个Executor所需要的CPU核数
     val coresPerExecutor = app.desc.coresPerExecutor
+    // 每个Executor所需的最少核数，如果设置了coresPerExecutor则为该值，否则为1
     val minCoresPerExecutor = coresPerExecutor.getOrElse(1)
+    // 如果没有设置coresPerExecutor，那么每个Worker上只有一个Executor,并尽可能分配资源
     val oneExecutorPerWorker = coresPerExecutor.isEmpty
+    // 每个Executor需要分配多少内存
     val memoryPerExecutor = app.desc.memoryPerExecutorMB
+    // 集群中可用的Worker节点的数量
     val numUsable = usableWorkers.length
+    // Worker节点所能提供的CPU核数数组
     val assignedCores = new Array[Int](numUsable) // Number of cores to give to each worker
+    // Worker分配Executor个数数组
     val assignedExecutors = new Array[Int](numUsable) // Number of new executors on each worker
+    // 需要分配的CPU核数，为应用程序所需CPU核数和可用CPU核数最小值
     var coresToAssign = math.min(app.coresLeft, usableWorkers.map(_.coresFree).sum)
 
     /** Return whether the specified worker can launch an executor for this app. */
+    /**
+      * 返回指定的Worker节点是否能够启动Executor，满足条件：
+      *   1. 应用程序需要分配CPU核数>=每个Executor所需的最少CPU核数
+      *   2. 是否有足够的CPU核数，判断条件为该Worker节点可用CPU核数-该Worker节点已分配的CPU核数>=每个Executor所需最少CPU核数
+      * 如果在该Worker节点上允许启动新的Executor，需要追加以下两个条件：
+      *   1. 判断内存是否足够启动Executor，其方法是：当前Worker节点可用内存-该Worker已分配的内存>=每个Executor分配的内存大小
+      *   2. 已经分配给该应用程序的Executor数量+已经运行该应用程序的Executor数量<该应用程序Executor设置的最大值
+      */
     def canLaunchExecutor(pos: Int): Boolean = {
       val keepScheduling = coresToAssign >= minCoresPerExecutor
       val enoughCores = usableWorkers(pos).coresFree - assignedCores(pos) >= minCoresPerExecutor
 
       // If we allow multiple executors per worker, then we can always launch new executors.
       // Otherwise, if there is already an executor on this worker, just give it more cores.
+      // 启动新Executor条件是：该Worker节点允许启动多个Executor或者在该Worker节点上没有为该应用程序分配Executor
       val launchingNewExecutor = !oneExecutorPerWorker || assignedExecutors(pos) == 0
+      // 如果在该Worker节点上允许启动多个Executor，那么该Executor节点满足启动条件就可以启动新Executor，
+      // 否则只能启动一个Executor并尽可能的多分配CPU核数
       if (launchingNewExecutor) {
         val assignedMemory = assignedExecutors(pos) * memoryPerExecutor
         val enoughMemory = usableWorkers(pos).memoryFree - assignedMemory >= memoryPerExecutor
@@ -623,15 +642,24 @@ private[deploy] class Master(
     // Keep launching executors until no more workers can accommodate any
     // more executors, or if we have reached this application's limits
     var freeWorkers = (0 until numUsable).filter(canLaunchExecutor)
+    // 在可用的Worker节点中启动Executor，在Worker节点每次分配资源时，分配给Executor所需的最少CPU核数，该过程是通过多次轮询进行，
+    // 直到没有Worker节点满足启动Executor条件活着已经达到应用程序限制。在分配过程中Worker节点可能多次分配，
+    // 如果该Worker节点可以启动多个Executor，则每次分配的时候启动新的Executor并赋予资源；
+    // 如果该Worker节点只能启动一个Executor，则每次分配的时候把资源追加到该Executor
     while (freeWorkers.nonEmpty) {
       freeWorkers.foreach { pos =>
         var keepScheduling = true
+        // 满足 keepScheduling标志为真（第一次分配或者集中运行）和该Worker节点满足
+        // 启动Executor条件时，进行资源分配
         while (keepScheduling && canLaunchExecutor(pos)) {
+          // 每次分配CPU核数为Executor所需的最少CPU核数
           coresToAssign -= minCoresPerExecutor
           assignedCores(pos) += minCoresPerExecutor
 
           // If we are launching one executor per worker, then every iteration assigns 1 core
           // to the executor. Otherwise, every iteration assigns cores to a new executor.
+          // 如果设置每个Executor启动CPU核数，则该Worker只能为该应用程序启动1个Executor，
+          // 否则在每次分配中启动1个新的Executor
           if (oneExecutorPerWorker) {
             assignedExecutors(pos) = 1
           } else {
@@ -642,13 +670,18 @@ private[deploy] class Master(
           // many workers as possible. If we are not spreading out, then we should keep
           // scheduling executors on this worker until we use all of its resources.
           // Otherwise, just move on to the next worker.
+          // 如果是分散运行，则在某一Worker节点上做完资源分配立即移到下一个Worker节点，
+          // 如果是集中运行，则持续在某一Worker节点上做资源分配，知道使用完该Worker节点所有资源。
+          // 传入的Worker节点列表是按照CPU核数倒序排列，在集中运行时，会尽可能少的使用Worker节点
           if (spreadOutApps) {
             keepScheduling = false
           }
         }
       }
+      // 继续从上一次分配完的可用Worker节点列表获取满足启动Executor的Worker节点列表
       freeWorkers = freeWorkers.filter(canLaunchExecutor)
     }
+    // 返回每个Worker节点分配的CPU核数
     assignedCores
   }
 
@@ -710,7 +743,7 @@ private[deploy] class Master(
     if (state != RecoveryState.ALIVE) {
       return
     }
-    // 对Worker节点进行随机排序
+    // 对Worker节点进行随机排序,能使Driver更加均衡地分布在集群中
     // Drivers take strict precedence over executors
     val shuffledAliveWorkers = Random.shuffle(workers.toSeq.filter(_.state == WorkerState.ALIVE))
     val numWorkersAlive = shuffledAliveWorkers.size
@@ -733,6 +766,7 @@ private[deploy] class Master(
         curPos = (curPos + 1) % numWorkersAlive
       }
     }
+    // 对等待应用程序按照顺序分配运行资源
     startExecutorsOnWorkers()
   }
 

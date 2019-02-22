@@ -168,10 +168,13 @@ private[spark] class TaskSchedulerImpl(
     val tasks = taskSet.tasks
     logInfo("Adding task set " + taskSet.id + " with " + tasks.length + " tasks")
     this.synchronized {
+      // 为每一个taskSet创建一个taskSetManager
+      // taskSetManager在后面负责，TaskSet的任务执行状况的监视和管理
       val manager = createTaskSetManager(taskSet, maxTaskFailures)
       val stage = taskSet.stageId
       val stageTaskSets =
         taskSetsByStageIdAndAttempt.getOrElseUpdate(stage, new HashMap[Int, TaskSetManager])
+      // 把manager加入内存缓存中
       stageTaskSets(taskSet.stageAttemptId) = manager
       val conflictingTaskSet = stageTaskSets.exists { case (_, ts) =>
         ts.taskSet != taskSet && !ts.isZombie
@@ -180,6 +183,8 @@ private[spark] class TaskSchedulerImpl(
         throw new IllegalStateException(s"more than one active taskSet for stage $stage:" +
           s" ${stageTaskSets.toSeq.map{_._2.taskSet.id}.mkString(",")}")
       }
+      // 将该任务集的管理器加入到系统调度池中，由系统统一调配，该调度器属于应用级别
+      // 支持FIFO和FAIR两种，默认FIFO
       schedulableBuilder.addTaskSetManager(manager, manager.taskSet.properties)
 
       if (!isLocal && !hasReceivedTask) {
@@ -197,6 +202,8 @@ private[spark] class TaskSchedulerImpl(
       }
       hasReceivedTask = true
     }
+    // 在创建SparkContext，创建TaskScheduler的时候，创建了StandaloneSchedulerBackend，这个backend是负责
+    // 创建AppClient，向Master注册Application的, 详见Spark运行时消息通信
     backend.reviveOffers()
   }
 
@@ -302,11 +309,21 @@ private[spark] class TaskSchedulerImpl(
     }
 
     // Randomly shuffle offers to avoid always placing tasks on the same set of workers.
+    // 首先，将可用的executor进行shuffle
     val shuffledOffers = Random.shuffle(offers)
     // Build a list of tasks to assign to each worker.
+    // 用于存储分配好资源的任务
+    // tasks，是一个序列，其中的每个元素又是一个ArrayBuffer,并且每个子ArrayBuffer的数量是固定的，也就是这个executor可用的cpu数量
     val tasks = shuffledOffers.map(o => new ArrayBuffer[TaskDescription](o.cores))
     val availableCpus = shuffledOffers.map(o => o.cores).toArray
+
+    // 获取按照调度策略排序好的TaskSetManager
+    // 从rootPool中取出排序了的TaskSetManager
+    // 在创建完TaskScheduler StandaloneSchedulerBackend之后，会执行initialize()方法，其实会创建一个调度池
+    // 这里就是所有提交的TaskSetManager，首先会放入这个调度池中，然后再执行task分配算法的时候，会从这个调度池中，取出排好队的TaskSetManager
     val sortedTaskSets = rootPool.getSortedTaskSetQueue
+
+    // 如果有新加入的Executor，需要重新计算数据本地性
     for (taskSet <- sortedTaskSets) {
       logDebug("parentName: %s, name: %s, runningTasks: %s".format(
         taskSet.parent.name, taskSet.name, taskSet.runningTasks))
@@ -317,10 +334,13 @@ private[spark] class TaskSchedulerImpl(
 
     // Take each TaskSet in our scheduling order, and then offer it each node in increasing order
     // of locality levels so that it gets a chance to launch local tasks on all of them.
+    // 为排序好的TaskSetManager 列表进行分配资源，分配的原则是就近原则，按照顺序PROCESS_LOCAL, NODE_LOCAL, NO_PREF, RACK_LOCAL, ANY
     // NOTE: the preferredLocality order: PROCESS_LOCAL, NODE_LOCAL, NO_PREF, RACK_LOCAL, ANY
     var launchedTask = false
     for (taskSet <- sortedTaskSets; maxLocality <- taskSet.myLocalityLevels) {
       do {
+        // 对当前taskset尝试使用最小本地化级别，将taskset的task，在executor上进行启动
+        // 如果启动不了，就跳出这个do while，进入下一级本地化级别，一次类推
         launchedTask = resourceOfferSingleTaskSet(
             taskSet, maxLocality, shuffledOffers, availableCpus, tasks)
       } while (launchedTask)
