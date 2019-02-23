@@ -44,12 +44,16 @@ class BlockManagerMasterEndpoint(
   extends ThreadSafeRpcEndpoint with Logging {
 
   // Mapping from block manager id to the block manager's information.
+  // 该HashMap中存放了BlockMangerId与BlockMangerInfo的对应，其中BlockMangerInfo包含了Executor内存使用情况、数据块的使用情况、已被缓存的数据块和Executor终端点引用
+  // 通过该引用可以向Execuotr发送消息
   private val blockManagerInfo = new mutable.HashMap[BlockManagerId, BlockManagerInfo]
 
   // Mapping from executor ID to block manager ID.
+  // 该HashMap中存放了ExecutorID和BlockMangerID对应列表
   private val blockManagerIdByExecutor = new mutable.HashMap[String, BlockManagerId]
 
   // Mapping from block id to the set of block managers that have the block.
+  // 该HashMap存放了BlockId和BlockManagerId序列对应的列表，原因在于一个数据块可能存在多个副本，保持在多个Executor中
   private val blockLocations = new JHashMap[BlockId, mutable.HashSet[BlockManagerId]]
 
   private val askThreadPool = ThreadUtils.newDaemonCachedThreadPool("block-manager-ask-thread-pool")
@@ -132,8 +136,12 @@ class BlockManagerMasterEndpoint(
 
     // Find all blocks for the given RDD, remove the block from both blockLocations and
     // the blockManagerInfo that is tracking the blocks.
+    // 在blockLocations和blockManagerInfo中删除该RDD的数据元信息
+    // 首先根据RDD编号获取该RDD存储的数据块信息
     val blocks = blockLocations.asScala.keys.flatMap(_.asRDDId).filter(_.rddId == rddId)
     blocks.foreach { blockId =>
+      //然后根据该数据块的信息找出这些数据块在blockManagerId中的列表，遍历这些列表并删除
+      // BlockManager包含该数据块的元数据，同时删除blockLocations对应数据块的元数据
       val bms: mutable.HashSet[BlockManagerId] = blockLocations.get(blockId)
       bms.foreach(bm => blockManagerInfo.get(bm).foreach(_.removeBlock(blockId)))
       blockLocations.remove(blockId)
@@ -141,6 +149,7 @@ class BlockManagerMasterEndpoint(
 
     // Ask the slaves to remove the RDD, and put the result in a sequence of Futures.
     // The dispatcher is used as an implicit argument into the Future sequence construction.
+    //最后发送RemoveRDD消息给Executor，通知其删除RDD
     val removeMsg = RemoveRdd(rddId)
     Future.sequence(
       blockManagerInfo.values.map { bm =>
