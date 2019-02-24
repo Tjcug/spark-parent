@@ -139,8 +139,10 @@ private[spark] abstract class MapOutputTracker(conf: SparkConf) extends Logging 
   def getMapSizesByExecutorId(shuffleId: Int, startPartition: Int, endPartition: Int)
       : Seq[(BlockManagerId, Seq[(BlockId, Long)])] = {
     logDebug(s"Fetching outputs for shuffle $shuffleId, partitions $startPartition-$endPartition")
+    // 通过shuffleId获取上游ShuffleMapTask输出数据的元数据
     val statuses = getStatuses(shuffleId)
     // Synchronize on the returned array because, on the driver, it gets mutated in place
+    // 使用同步的方式把获取到的MapStatuses转为Seq[(BlockManagerId, Seq[(BlockId, Long)])]格式
     statuses.synchronized {
       return MapOutputTracker.convertMapStatuses(shuffleId, startPartition, endPartition, statuses)
     }
@@ -170,6 +172,8 @@ private[spark] abstract class MapOutputTracker(conf: SparkConf) extends Logging 
    * (It would be nice to remove this restriction in the future.)
    */
   private def getStatuses(shuffleId: Int): Array[MapStatus] = {
+    // 根据ShuffleMapTask的编号尝试从本地获取输出结果的元数据MpaStatus，
+    // 如果不能获取这些信息，则向MapOutPutTracekrMaster请求获取
     val statuses = mapStatuses.get(shuffleId).orNull
     if (statuses == null) {
       logInfo("Don't have map outputs for shuffle " + shuffleId + ", fetching them")
@@ -177,6 +181,7 @@ private[spark] abstract class MapOutputTracker(conf: SparkConf) extends Logging 
       var fetchedStatuses: Array[MapStatus] = null
       fetching.synchronized {
         // Someone else is fetching it; wait for them to be done
+        // 其他人在读取该信息，等待其他人读取完毕后再进行读取
         while (fetching.contains(shuffleId)) {
           try {
             fetching.wait()
@@ -187,6 +192,8 @@ private[spark] abstract class MapOutputTracker(conf: SparkConf) extends Logging 
 
         // Either while we waited the fetch happened successfully, or
         // someone fetched it in between the get and the fetching.synchronized.
+        // 使用同步操作读取指定Shuffle编号的数据，该操作要么成功读取，要么其他人同时在读取，此时把读取Shuffle编号
+        // 加入到fetching读取列表中，以便后续中读取。
         fetchedStatuses = mapStatuses.get(shuffleId).orNull
         if (fetchedStatuses == null) {
           // We have to do the fetch, get others to wait for us.
@@ -199,7 +206,10 @@ private[spark] abstract class MapOutputTracker(conf: SparkConf) extends Logging 
         logInfo("Doing the fetch; tracker endpoint = " + trackerEndpoint)
         // This try-finally prevents hangs due to timeouts:
         try {
+          // 发送消息给MapOutputTrackerMaster，获取该ShuffleMapTask输出的元数据
           val fetchedBytes = askTracker[Array[Byte]](GetMapOutputStatuses(shuffleId))
+
+          // 对获取的元数据进行反序列化
           fetchedStatuses = MapOutputTracker.deserializeMapStatuses(fetchedBytes)
           logInfo("Got the output locations")
           mapStatuses.put(shuffleId, fetchedStatuses)

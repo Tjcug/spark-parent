@@ -197,6 +197,8 @@ final class ShuffleBlockFetcherIterator(
     // Make remote requests at most maxBytesInFlight / 5 in length; the reason to keep them
     // smaller than maxBytesInFlight is to allow multiple, parallel fetches from up to 5
     // nodes, rather than blocking on reading output from one node.
+
+    // 设置每次请求的大小不超过maxBytesInFlight的1/5，该阈值由spark.reducer.maxSizeInFlight配置，默认48MB
     val targetRequestSize = math.max(maxBytesInFlight / 5, 1L)
     logDebug("maxBytesInFlight: " + maxBytesInFlight + ", targetRequestSize: " + targetRequestSize)
 
@@ -210,6 +212,8 @@ final class ShuffleBlockFetcherIterator(
       totalBlocks += blockInfos.size
       if (address.executorId == blockManager.blockManagerId.executorId) {
         // Filter out zero-sized blocks
+        // 当数据和所在BlockManager在一个节点时，把该信息加入到localBlocks列表中，
+        // 需要过滤大小为0的数据块
         localBlocks ++= blockInfos.filter(_._2 != 0).map(_._1)
         numBlocksToFetch += localBlocks.size
       } else {
@@ -220,6 +224,7 @@ final class ShuffleBlockFetcherIterator(
           val (blockId, size) = iterator.next()
           // Skip empty blocks
           if (size > 0) {
+            // 对于不空数据块，把其信息加入到列表中
             curBlocks += ((blockId, size))
             remoteBlocks += blockId
             numBlocksToFetch += 1
@@ -227,6 +232,7 @@ final class ShuffleBlockFetcherIterator(
           } else if (size < 0) {
             throw new BlockException(blockId, "Negative block size " + size)
           }
+          // 按照不大于maxBytesInFlight的标准，把这些需要处理数据组合在一起
           if (curRequestSize >= targetRequestSize) {
             // Add this FetchRequest
             remoteRequests += new FetchRequest(address, curBlocks)
@@ -236,6 +242,7 @@ final class ShuffleBlockFetcherIterator(
           }
         }
         // Add in the final request
+        // 剩余的处理数据组成一次请求
         if (curBlocks.nonEmpty) {
           remoteRequests += new FetchRequest(address, curBlocks)
         }
@@ -277,18 +284,21 @@ final class ShuffleBlockFetcherIterator(
     // Split local and remote blocks.
     val remoteRequests = splitLocalRemoteBlocks()
     // Add the remote requests into our queue in a random order
+    // 对获取数据位置的元数据进行分区，区分为本地节点还是远程节点
     fetchRequests ++= Utils.randomize(remoteRequests)
     assert ((0 == reqsInFlight) == (0 == bytesInFlight),
       "expected reqsInFlight = 0 but found reqsInFlight = " + reqsInFlight +
       ", expected bytesInFlight = 0 but found bytesInFlight = " + bytesInFlight)
 
     // Send out initial requests for blocks, up to our maxBytesInFlight
+    // 对于远程节点数据，使用Netty网络方式读取
     fetchUpToMaxBytes()
 
     val numFetches = remoteRequests.size - fetchRequests.size
     logInfo("Started " + numFetches + " remote fetches in" + Utils.getUsedTimeMs(startTime))
 
     // Get Local Blocks
+    // 对于本地数据，sort Based Shuffle使用的是IndexShuffleBlockResolver的getBlockData方法获取数据
     fetchLocalBlocks()
     logDebug("Got local blocks in " + Utils.getUsedTimeMs(startTime))
   }

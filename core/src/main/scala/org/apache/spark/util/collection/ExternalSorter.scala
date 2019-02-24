@@ -179,16 +179,20 @@ private[spark] class ExternalSorter[K, V, C](
 
   def insertAll(records: Iterator[Product2[K, V]]): Unit = {
     // TODO: stop combining if we find that the reduction factor isn't high
+    // 根据外部排序中是否需要进行聚合操作（Aggregator）
     val shouldCombine = aggregator.isDefined
 
     if (shouldCombine) {
       // Combine values in-memory first using our AppendOnlyMap
+      // 如果需要聚合，则使用PartitionedAppendOnlyMap根据键值进行合并
       val mergeValue = aggregator.get.mergeValue
       val createCombiner = aggregator.get.createCombiner
       var kv: Product2[K, V] = null
       val update = (hadValue: Boolean, oldValue: C) => {
         if (hadValue) mergeValue(oldValue, kv._2) else createCombiner(kv._2)
       }
+      // 对数据进行排序写入到内存缓冲区中，如果排序中的Map占用的内存以及超越了使用的阈值，
+      // 则对Map中的内容溢写到磁盘中，每一次溢写产生一个不同的文件
       while (records.hasNext) {
         addElementsRead()
         kv = records.next()
@@ -197,6 +201,8 @@ private[spark] class ExternalSorter[K, V, C](
       }
     } else {
       // Stick values into our buffer
+      // 外部排序中，不需要聚合操作
+      // 对数据进行排序写入到内存缓冲区中
       while (records.hasNext) {
         addElementsRead()
         val kv = records.next()

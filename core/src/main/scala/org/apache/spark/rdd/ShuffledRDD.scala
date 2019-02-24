@@ -103,8 +103,11 @@ class ShuffledRDD[K: ClassTag, V: ClassTag, C: ClassTag](
     tracker.getPreferredLocationsForShuffle(dep, partition.index)
   }
 
+  // ResultTask或者ShuffleMapTask，在执行到ShuffledRDD时
+  // 会调用compute方法来计算partition的数据
   override def compute(split: Partition, context: TaskContext): Iterator[(K, C)] = {
     val dep = dependencies.head.asInstanceOf[ShuffleDependency[K, V, C]]
+    // 获取Reader(BlockStoreShuffleReader)，拉取shuffleMapTask/ResultTask，需要聚合的数据
     SparkEnv.get.shuffleManager.getReader(dep.shuffleHandle, split.index, split.index + 1, context)
       .read()
       .asInstanceOf[Iterator[(K, C)]]

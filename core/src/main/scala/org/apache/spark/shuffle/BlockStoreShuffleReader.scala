@@ -42,12 +42,18 @@ private[spark] class BlockStoreShuffleReader[K, C](
 
   /** Read the combined key-values for this reduce task */
   override def read(): Iterator[Product2[K, C]] = {
+    // ShuffleBlockFetcherIterator根据得到的地理位置信息，通过BlockManager去远程的
+    // ShuffleMapTask所在节点的blockManager去拉取数据
     val blockFetcherItr = new ShuffleBlockFetcherIterator(
       context,
       blockManager.shuffleClient,
       blockManager,
+      // 通过MapOutputTracker获取上游的ShuffleMapTask输出数据的元数据，
+      // 先尝试从本地获取，获取不到，通过RPC发送消息给MapOutputTrackerMaster,获取元数据
       mapOutputTracker.getMapSizesByExecutorId(handle.shuffleId, startPartition, endPartition),
       // Note: we use getSizeAsMb when no suffix is provided for backwards compatibility
+
+      // 远程获取数据时，设置每次传输数据的大小
       SparkEnv.get.conf.getSizeAsMb("spark.reducer.maxSizeInFlight", "48m") * 1024 * 1024,
       SparkEnv.get.conf.getInt("spark.reducer.maxReqsInFlight", Int.MaxValue))
 
@@ -81,12 +87,14 @@ private[spark] class BlockStoreShuffleReader[K, C](
     val aggregatedIter: Iterator[Product2[K, C]] = if (dep.aggregator.isDefined) {
       if (dep.mapSideCombine) {
         // We are reading values that are already combined
+        // 对于上游ShuffleMapTask已经合并的，对合并结果数据进行聚合
         val combinedKeyValuesIterator = interruptibleIter.asInstanceOf[Iterator[(K, C)]]
         dep.aggregator.get.combineCombinersByKey(combinedKeyValuesIterator, context)
       } else {
         // We don't know the value type, but also don't care -- the dependency *should*
         // have made sure its compatible w/ this aggregator, which will convert the value
         // type to the combined type C
+        // 对未合并的数据进行聚合处理，注意对比类型一个是C一个是Nothing
         val keyValuesIterator = interruptibleIter.asInstanceOf[Iterator[(K, Nothing)]]
         dep.aggregator.get.combineValuesByKey(keyValuesIterator, context)
       }
@@ -96,7 +104,11 @@ private[spark] class BlockStoreShuffleReader[K, C](
     }
 
     // Sort the output if there is a sort ordering defined.
+    // 如果需要对key排序，则进行排序。基于sort的shuffle实现过程中，默认只是按照partitionId排序
+    // 在每一个partition内部并没有排序，因此添加了keyOrdering变量，提供是否需要对分区内部的key排序
     dep.keyOrdering match {
+      // 对于需要排序，使用ExternalSorter进行排序，根据获取的排序方式，对数据进行排序并写入到内存缓冲区中。
+      // 如果排序中的Map占用的内存已经超越了使用的阈值，则将Map中的内容溢写到磁盘
       case Some(keyOrd: Ordering[K]) =>
         // Create an ExternalSorter to sort the data. Note that if spark.shuffle.spill is disabled,
         // the ExternalSorter won't spill to disk.
